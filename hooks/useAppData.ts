@@ -1,233 +1,348 @@
-
 import { useState, useEffect, useCallback } from 'react';
-import { AppData, Project, Expense, Income, ExtraIncome, GeneralExpense, Debt, DebtPayment } from '../types';
-import { LOCAL_STORAGE_KEY, DEFAULT_EXPENSE_CATEGORIES } from '../constants';
+import {
+  doc,
+  getDoc,
+  setDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
+import {
+  AppData,
+  Project,
+  Expense,
+  Income,
+  ExtraIncome,
+  GeneralExpense,
+  Debt,
+  DebtPayment,
+} from '../types';
+import { DEFAULT_EXPENSE_CATEGORIES } from '../constants';
 import { generateId } from '../utils/helpers';
+import { db } from '../firebase';
 
 const DEFAULT_CURRENCY = 'RWF';
 
-const getInitialData = (): AppData => {
-  try {
-    const item = window.localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (item) {
-      const parsed = JSON.parse(item);
-      return {
-        projects: Array.isArray(parsed.projects) ? parsed.projects : [],
-        expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
-        incomes: Array.isArray(parsed.incomes) ? parsed.incomes : [],
-        extraIncomes: Array.isArray(parsed.extraIncomes) ? parsed.extraIncomes : [],
-        generalExpenses: Array.isArray(parsed.generalExpenses) ? parsed.generalExpenses : [],
-        debts: Array.isArray(parsed.debts) ? parsed.debts : [],
-        expenseCategories: Array.isArray(parsed.expenseCategories) ? parsed.expenseCategories : DEFAULT_EXPENSE_CATEGORIES,
-        currency: parsed.currency || DEFAULT_CURRENCY,
-      };
-    }
-  } catch (error) {
-    console.error('Error reading from localStorage', error);
-  }
+const EMPTY_DATA: AppData = {
+  projects: [],
+  expenses: [],
+  incomes: [],
+  extraIncomes: [],
+  generalExpenses: [],
+  debts: [],
+  expenseCategories: DEFAULT_EXPENSE_CATEGORIES,
+  currency: DEFAULT_CURRENCY,
+};
+
+const normalizeData = (raw: any): AppData => {
+  if (!raw || typeof raw !== 'object') return EMPTY_DATA;
+
   return {
-    projects: [],
-    expenses: [],
-    incomes: [],
-    extraIncomes: [],
-    generalExpenses: [],
-    debts: [],
-    expenseCategories: DEFAULT_EXPENSE_CATEGORIES,
-    currency: DEFAULT_CURRENCY,
+    projects: Array.isArray(raw.projects) ? raw.projects : [],
+    expenses: Array.isArray(raw.expenses) ? raw.expenses : [],
+    incomes: Array.isArray(raw.incomes) ? raw.incomes : [],
+    extraIncomes: Array.isArray(raw.extraIncomes) ? raw.extraIncomes : [],
+    generalExpenses: Array.isArray(raw.generalExpenses) ? raw.generalExpenses : [],
+    debts: Array.isArray(raw.debts) ? raw.debts : [],
+    expenseCategories: Array.isArray(raw.expenseCategories)
+      ? raw.expenseCategories
+      : DEFAULT_EXPENSE_CATEGORIES,
+    currency: raw.currency || DEFAULT_CURRENCY,
   };
 };
 
-export const useAppData = () => {
-  const [data, setData] = useState<AppData>(getInitialData);
+export const useAppData = (userId?: string | null) => {
+  const [data, setData] = useState<AppData>(EMPTY_DATA);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const docRef = userId ? doc(db, 'users', userId, 'appData', 'main') : null;
+
+  const loadData = useCallback(async () => {
+    if (!docRef) {
+      setLoading(false);
+      setError('No signed-in user found.');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError(null);
+
+      const snap = await getDoc(docRef);
+
+      if (snap.exists()) {
+        const raw = snap.data();
+        setData(normalizeData(raw));
+      } else {
+        await setDoc(docRef, {
+          ...EMPTY_DATA,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        setData(EMPTY_DATA);
+      }
+    } catch (err) {
+      console.error('Error loading Firestore data:', err);
+      setError('Failed to load data from Firebase.');
+    } finally {
+      setLoading(false);
+    }
+  }, [docRef]);
+
+  const saveData = useCallback(
+    async (nextData: AppData) => {
+      if (!docRef) {
+        setError('No signed-in user found.');
+        return;
+      }
+
+      try {
+        setSaving(true);
+        setError(null);
+
+        await setDoc(
+          docRef,
+          {
+            ...nextData,
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      } catch (err) {
+        console.error('Error saving Firestore data:', err);
+        setError('Failed to save data to Firebase.');
+      } finally {
+        setSaving(false);
+      }
+    },
+    [docRef]
+  );
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-    } catch (error) {
-      console.error('Error writing to localStorage', error);
-    }
-  }, [data]);
+    loadData();
+  }, [loadData]);
+
+  const updateData = useCallback(
+    (updater: (prev: AppData) => AppData) => {
+      setData(prev => {
+        const next = updater(prev);
+        void saveData(next);
+        return next;
+      });
+    },
+    [saveData]
+  );
 
   const addProject = useCallback((project: Omit<Project, 'id'>) => {
     const newProject: Project = { ...project, id: generateId() };
-    setData(prevData => ({ ...prevData, projects: [...prevData.projects, newProject] }));
+    updateData(prev => ({
+      ...prev,
+      projects: [...prev.projects, newProject],
+    }));
     return newProject;
-  }, []);
+  }, [updateData]);
 
   const updateProject = useCallback((updatedProject: Project) => {
-    setData(prevData => ({
-      ...prevData,
-      projects: prevData.projects.map(p => p.id === updatedProject.id ? updatedProject : p),
+    updateData(prev => ({
+      ...prev,
+      projects: prev.projects.map(p => p.id === updatedProject.id ? updatedProject : p),
     }));
-  }, []);
+  }, [updateData]);
 
   const deleteProject = useCallback((projectId: string) => {
-    setData(prevData => ({
-      ...prevData,
-      projects: prevData.projects.filter(p => p.id !== projectId),
-      expenses: prevData.expenses.filter(e => e.projectId !== projectId),
-      incomes: prevData.incomes.filter(i => i.projectId !== projectId),
+    updateData(prev => ({
+      ...prev,
+      projects: prev.projects.filter(p => p.id !== projectId),
+      expenses: prev.expenses.filter(e => e.projectId !== projectId),
+      incomes: prev.incomes.filter(i => i.projectId !== projectId),
     }));
-  }, []);
-  
+  }, [updateData]);
+
   const addExpense = useCallback((expense: Omit<Expense, 'id'>) => {
     const newExpense: Expense = { ...expense, id: generateId() };
-    setData(prevData => ({ ...prevData, expenses: [...prevData.expenses, newExpense] }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      expenses: [...prev.expenses, newExpense],
+    }));
+  }, [updateData]);
 
   const updateExpense = useCallback((updatedExpense: Expense) => {
-    setData(prevData => ({
-      ...prevData,
-      expenses: prevData.expenses.map(e => e.id === updatedExpense.id ? updatedExpense : e),
+    updateData(prev => ({
+      ...prev,
+      expenses: prev.expenses.map(e => e.id === updatedExpense.id ? updatedExpense : e),
     }));
-  }, []);
+  }, [updateData]);
 
   const deleteExpense = useCallback((expenseId: string) => {
-    setData(prevData => ({ ...prevData, expenses: prevData.expenses.filter(e => e.id !== expenseId) }));
-  }, []);
-  
+    updateData(prev => ({
+      ...prev,
+      expenses: prev.expenses.filter(e => e.id !== expenseId),
+    }));
+  }, [updateData]);
+
   const addIncome = useCallback((income: Omit<Income, 'id'>) => {
     const newIncome: Income = { ...income, id: generateId() };
-    setData(prevData => ({ ...prevData, incomes: [...prevData.incomes, newIncome] }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      incomes: [...prev.incomes, newIncome],
+    }));
+  }, [updateData]);
 
   const updateIncome = useCallback((updatedIncome: Income) => {
-    setData(prevData => ({
-      ...prevData,
-      incomes: prevData.incomes.map(i => i.id === updatedIncome.id ? updatedIncome : i),
+    updateData(prev => ({
+      ...prev,
+      incomes: prev.incomes.map(i => i.id === updatedIncome.id ? updatedIncome : i),
     }));
-  }, []);
+  }, [updateData]);
 
   const deleteIncome = useCallback((incomeId: string) => {
-      setData(prevData => ({ ...prevData, incomes: prevData.incomes.filter(i => i.id !== incomeId) }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      incomes: prev.incomes.filter(i => i.id !== incomeId),
+    }));
+  }, [updateData]);
 
-  // --- Extra Incomes ---
   const addExtraIncome = useCallback((income: Omit<ExtraIncome, 'id'>) => {
     const newIncome: ExtraIncome = { ...income, id: generateId() };
-    setData(prevData => ({ ...prevData, extraIncomes: [...prevData.extraIncomes, newIncome] }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      extraIncomes: [...prev.extraIncomes, newIncome],
+    }));
+  }, [updateData]);
 
   const updateExtraIncome = useCallback((updatedIncome: ExtraIncome) => {
-    setData(prevData => ({
-      ...prevData,
-      extraIncomes: prevData.extraIncomes.map(i => i.id === updatedIncome.id ? updatedIncome : i),
+    updateData(prev => ({
+      ...prev,
+      extraIncomes: prev.extraIncomes.map(i => i.id === updatedIncome.id ? updatedIncome : i),
     }));
-  }, []);
+  }, [updateData]);
 
   const deleteExtraIncome = useCallback((id: string) => {
-    setData(prevData => ({ ...prevData, extraIncomes: prevData.extraIncomes.filter(i => i.id !== id) }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      extraIncomes: prev.extraIncomes.filter(i => i.id !== id),
+    }));
+  }, [updateData]);
 
-  // --- General Expenses ---
   const addGeneralExpense = useCallback((expense: Omit<GeneralExpense, 'id'>) => {
     const newExpense: GeneralExpense = { ...expense, id: generateId() };
-    setData(prevData => ({ ...prevData, generalExpenses: [...prevData.generalExpenses, newExpense] }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      generalExpenses: [...prev.generalExpenses, newExpense],
+    }));
+  }, [updateData]);
 
   const updateGeneralExpense = useCallback((updatedExpense: GeneralExpense) => {
-    setData(prevData => ({
-      ...prevData,
-      generalExpenses: prevData.generalExpenses.map(e => e.id === updatedExpense.id ? updatedExpense : e),
+    updateData(prev => ({
+      ...prev,
+      generalExpenses: prev.generalExpenses.map(e => e.id === updatedExpense.id ? updatedExpense : e),
     }));
-  }, []);
+  }, [updateData]);
 
   const deleteGeneralExpense = useCallback((id: string) => {
-    setData(prevData => ({ ...prevData, generalExpenses: prevData.generalExpenses.filter(e => e.id !== id) }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      generalExpenses: prev.generalExpenses.filter(e => e.id !== id),
+    }));
+  }, [updateData]);
 
-  // --- Debts ---
   const addDebt = useCallback((debt: Omit<Debt, 'id'>) => {
     const newDebt: Debt = { ...debt, id: generateId() };
-    setData(prevData => ({ ...prevData, debts: [...prevData.debts, newDebt] }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      debts: [...prev.debts, newDebt],
+    }));
+  }, [updateData]);
 
   const deleteDebt = useCallback((id: string) => {
-    setData(prevData => ({ ...prevData, debts: prevData.debts.filter(d => d.id !== id) }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      debts: prev.debts.filter(d => d.id !== id),
+    }));
+  }, [updateData]);
 
   const addDebtPayment = useCallback((debtId: string, payment: DebtPayment) => {
-    setData(prevData => {
-        const debts = prevData.debts.map(d => {
-            if (d.id === debtId) {
-                const payments = d.payments || [];
-                const updatedPayments = [...payments, payment];
-                const totalPaid = updatedPayments.reduce((s, p) => s + p.amount, 0);
-                const status = totalPaid >= d.amount ? 'Paid' : 'Partial';
-                return { ...d, payments: updatedPayments, status };
-            }
-            return d;
-        });
-        return { ...prevData, debts };
+    updateData(prev => {
+      const debts = prev.debts.map(d => {
+        if (d.id === debtId) {
+          const payments = d.payments || [];
+          const updatedPayments = [...payments, payment];
+          const totalPaid = updatedPayments.reduce((s, p) => s + p.amount, 0);
+          const status = totalPaid >= d.amount ? 'Paid' : 'Partial';
+          return { ...d, payments: updatedPayments, status };
+        }
+        return d;
+      });
+
+      return { ...prev, debts };
     });
-  }, []);
+  }, [updateData]);
 
   const undoSettlement = useCallback((debtId: string) => {
-    setData(prevData => {
-        const debts = prevData.debts.map(d => {
-            const payments = d.payments || [];
-            if (d.id === debtId && payments.length > 0) {
-                // Remove the last payment
-                const updatedPayments = payments.slice(0, -1);
-                const totalPaid = updatedPayments.reduce((s, p) => s + p.amount, 0);
-                // Re-evaluate status
-                const status = totalPaid >= d.amount ? 'Paid' : (totalPaid > 0 ? 'Partial' : 'Unpaid');
-                return { ...d, payments: updatedPayments, status };
-            }
-            return d;
-        });
-        return { ...prevData, debts };
+    updateData(prev => {
+      const debts = prev.debts.map(d => {
+        const payments = d.payments || [];
+        if (d.id === debtId && payments.length > 0) {
+          const updatedPayments = payments.slice(0, -1);
+          const totalPaid = updatedPayments.reduce((s, p) => s + p.amount, 0);
+          const status = totalPaid >= d.amount ? 'Paid' : (totalPaid > 0 ? 'Partial' : 'Unpaid');
+          return { ...d, payments: updatedPayments, status };
+        }
+        return d;
+      });
+
+      return { ...prev, debts };
     });
-  }, []);
+  }, [updateData]);
 
   const addExpenseCategory = useCallback((category: string) => {
-      if (category && !data.expenseCategories.includes(category)) {
-          setData(prevData => ({ ...prevData, expenseCategories: [...prevData.expenseCategories, category] }));
-      }
-  }, [data.expenseCategories]);
+    updateData(prev => {
+      if (!category || prev.expenseCategories.includes(category)) return prev;
+      return {
+        ...prev,
+        expenseCategories: [...prev.expenseCategories, category],
+      };
+    });
+  }, [updateData]);
 
   const deleteExpenseCategory = useCallback((category: string) => {
-      setData(prevData => ({ ...prevData, expenseCategories: prevData.expenseCategories.filter(c => c !== category) }));
-  }, []);
-  
+    updateData(prev => ({
+      ...prev,
+      expenseCategories: prev.expenseCategories.filter(c => c !== category),
+    }));
+  }, [updateData]);
+
   const updateCurrency = useCallback((currency: string) => {
-      setData(prevData => ({ ...prevData, currency }));
-  }, []);
+    updateData(prev => ({
+      ...prev,
+      currency,
+    }));
+  }, [updateData]);
 
-  const importData = useCallback((jsonData: string) => {
+  const importData = useCallback(async (jsonData: string) => {
     try {
-        const parsed = JSON.parse(jsonData);
-        if (Array.isArray(parsed.projects) && Array.isArray(parsed.expenses)) {
-             setData({
-                 ...parsed,
-                 extraIncomes: parsed.extraIncomes || []
-             });
-             return true;
-        }
-        return false;
+      const parsed = JSON.parse(jsonData);
+      const normalized = normalizeData(parsed);
+      setData(normalized);
+      await saveData(normalized);
+      return true;
     } catch (e) {
-        console.error("Invalid JSON", e);
-        return false;
+      console.error('Invalid JSON', e);
+      return false;
     }
-  }, []);
+  }, [saveData]);
 
-  const resetData = useCallback(() => {
-    const freshData = {
-        projects: [],
-        expenses: [],
-        incomes: [],
-        extraIncomes: [],
-        generalExpenses: [],
-        debts: [],
-        expenseCategories: DEFAULT_EXPENSE_CATEGORIES,
-        currency: DEFAULT_CURRENCY,
-    };
-    setData(freshData);
-    window.localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(freshData));
-  }, []);
+  const resetData = useCallback(async () => {
+    setData(EMPTY_DATA);
+    await saveData(EMPTY_DATA);
+  }, [saveData]);
 
   return {
     data,
+    loading,
+    saving,
+    error,
+    reload: loadData,
     addProject,
     updateProject,
     deleteProject,
