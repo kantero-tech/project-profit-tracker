@@ -1,0 +1,5 @@
+{
+  "name": "Project Profit Tracker",
+  "description": "A mobile app for Express Workshop to record project expenses and incomes, automatically calculate profits, and summarize earnings monthly and yearly.",
+  "requestFramePermissions": []
+}
